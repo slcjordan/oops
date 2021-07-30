@@ -32,9 +32,9 @@ func AcceptError(err error) Condition {
 	})
 }
 
-// AcceptLatency adds latency to listener accept requests until
-// either timeout or underlying listener is closed.  No duration will hang
-// indefinitely until the underlying listener is closed.
+// AcceptLatency adds latency to listener accept requests until either timeout
+// or underlying listener is closed. No duration hangs indefinitely until the
+// underlying listener is closed.
 func AcceptLatency(d ...time.Duration) Condition {
 	return newListener(func(l *listener) *listener {
 		var i uint64
@@ -57,7 +57,8 @@ func AcceptLatency(d ...time.Duration) Condition {
 
 // ReadLatency adds latency to each read from underlying connections. Reads
 // will delay for timeout or until the underlying connection is closed. No
-// duration will hang indefinitely until the underlying connection is closed.
+// duration hangs indefinitely until the underlying connection is closed or
+// read deadline is exceeded.
 func ReadLatency(d ...time.Duration) Condition {
 	return newConn(func(cn *conn) *conn {
 		doRead := cn.read
