@@ -95,6 +95,46 @@ func ReadLatency(d ...time.Duration) Condition {
 	})
 }
 
+// WriteLatency adds latency to each write from underlying connections. Writes
+// will delay for timeout or until the underlying connection is closed. No
+// duration hangs indefinitely until the underlying connection is closed or
+// write deadline is exceeded.
+func WriteLatency(d ...time.Duration) Condition {
+	return newConn(func(cn *conn) *conn {
+		doWrite := cn.write
+		doSetWriteDeadline := cn.setWriteDeadline
+		doSetDeadline := cn.setDeadline
+		doClose := cn.close
+		dl := newDeadline()
+		var i uint64
+		cn.write = func(b []byte) (int, error) {
+			var latency time.Duration
+			if len(d) != 0 {
+				idx := int((atomic.AddUint64(&i, 1) - 1) % uint64(len(d)))
+				latency = d[idx]
+			}
+			err := dl.Wait(latency)
+			if err != nil {
+				return 0, err
+			}
+			return doWrite(b)
+		}
+		cn.setWriteDeadline = func(t time.Time) error {
+			dl.Reset(t)
+			return doSetWriteDeadline(t)
+		}
+		cn.setDeadline = func(t time.Time) error {
+			dl.Reset(t)
+			return doSetDeadline(t)
+		}
+		cn.close = func() error {
+			dl.Close()
+			return doClose()
+		}
+		return cn
+	})
+}
+
 // ReadError causes the listener's connections to return an error on read.
 // Ordering matters with this option as it short-circuits any options after
 // this one.
