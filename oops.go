@@ -1,22 +1,23 @@
 package oops
 
 import (
+	"context"
 	"net"
 	"os"
 	"sync/atomic"
 	"time"
 )
 
-// Dialer establishes a connection.
-type Dialer func(network, addr string) (net.Conn, error)
+// DialFunc establishes a connection.
+type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
-// InjectDialer injects conditions into a listener.
-func InjectDialer(f Dialer, conds ...Condition) Dialer {
-	return func(network, addr string) (net.Conn, error) {
+// InjectDialFunc injects conditions into a listener.
+func InjectDialFunc(f DialFunc, conds ...Condition) DialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		for _, cond := range conds {
-			f = cond.Dialer(f)
+			f = cond.DialFunc(f)
 		}
-		return f(network, addr)
+		return f(ctx, network, addr)
 	}
 }
 
@@ -31,7 +32,7 @@ func InjectListener(l net.Listener, conds ...Condition) net.Listener {
 // Condition simulates an error scenario.
 type Condition interface {
 	Listener(net.Listener) net.Listener
-	Dialer(Dialer) Dialer
+	DialFunc(DialFunc) DialFunc
 }
 
 // AcceptError causes an error on accept.  Ordering matters with this option as
@@ -44,8 +45,8 @@ func AcceptError(err error) Condition {
 			}
 			return l
 		},
-		dialer: func(d Dialer) Dialer {
-			return func(network, addr string) (net.Conn, error) {
+		dialFunc: func(d DialFunc) DialFunc {
+			return func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return nil, err
 			}
 		},
@@ -78,8 +79,8 @@ func AcceptLatency(d ...time.Duration) Condition {
 			}
 			return l
 		},
-		dialer: func(dial Dialer) Dialer {
-			return func(network, addr string) (net.Conn, error) {
+		dialFunc: func(dial DialFunc) DialFunc {
+			return func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if len(d) > 0 {
 					idx := int((atomic.AddUint64(&i, 1) - 1) % uint64(len(d)))
 					timer := time.NewTimer(d[idx])
@@ -89,7 +90,7 @@ func AcceptLatency(d ...time.Duration) Condition {
 					var blockForever chan struct{} = nil
 					<-blockForever
 				}
-				return dial(network, addr)
+				return dial(ctx, network, addr)
 			}
 		},
 	}
@@ -189,7 +190,7 @@ func ReadError(err error) Condition {
 
 type decorator struct {
 	listener func(*listener) *listener
-	dialer   func(Dialer) Dialer
+	dialFunc func(DialFunc) DialFunc
 }
 
 func (d *decorator) Listener(l net.Listener) net.Listener {
@@ -201,8 +202,8 @@ func (d *decorator) Listener(l net.Listener) net.Listener {
 	return d.listener(result)
 }
 
-func (d *decorator) Dialer(dial Dialer) Dialer {
-	return d.dialer(dial)
+func (d *decorator) DialFunc(dial DialFunc) DialFunc {
+	return d.dialFunc(dial)
 }
 
 type listener struct {
@@ -288,9 +289,9 @@ func newConn(f func(*conn) *conn) Condition {
 			}
 			return l
 		},
-		dialer: func(d Dialer) Dialer {
-			return func(network, addr string) (net.Conn, error) {
-				c, err := d(network, addr)
+		dialFunc: func(d DialFunc) DialFunc {
+			return func(ctx context.Context, network, addr string) (net.Conn, error) {
+				c, err := d(ctx, network, addr)
 				if err != nil {
 					return c, err
 				}

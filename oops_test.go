@@ -2,6 +2,7 @@ package oops
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -371,9 +372,9 @@ func TestDialerRead(t *testing.T) {
 			input:      []byte(`this is a test`),
 		},
 	} {
-		dialer := func(string, string) (net.Conn, error) { return &mockConn{}, nil }
+		dialer := func(context.Context, string, string) (net.Conn, error) { return &mockConn{}, nil }
 		t.Run(testCase.Name, func(t *testing.T) {
-			conn, err := InjectDialer(dialer, testCase.Conditions...)("", "")
+			conn, err := InjectDialFunc(dialer, testCase.Conditions...)(context.Background(), "", "")
 			if err != nil {
 				t.Error(err)
 			}
@@ -491,9 +492,9 @@ func TestDialerWrite(t *testing.T) {
 			input:      []byte(`this is a test`),
 		},
 	} {
-		dialer := func(string, string) (net.Conn, error) { return &mockConn{}, nil }
+		dialer := func(context.Context, string, string) (net.Conn, error) { return &mockConn{}, nil }
 		t.Run(testCase.Name, func(t *testing.T) {
-			conn, err := InjectDialer(dialer, testCase.Conditions...)("", "")
+			conn, err := InjectDialFunc(dialer, testCase.Conditions...)(context.Background(), "", "")
 			if err != nil {
 				t.Error(err)
 			}
