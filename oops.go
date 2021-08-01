@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+// Dialer establishes a connection.
+type Dialer func(network, addr string) (net.Conn, error)
+
+// InjectDialer injects conditions into a listener.
+func InjectDialer(f Dialer, conds ...Condition) Dialer {
+	return func(network, addr string) (net.Conn, error) {
+		for _, cond := range conds {
+			f = cond.Dialer(f)
+		}
+		return f(network, addr)
+	}
+}
+
 // InjectListener injects conditions into a listener.
 func InjectListener(l net.Listener, conds ...Condition) net.Listener {
 	for _, cond := range conds {
@@ -18,41 +31,68 @@ func InjectListener(l net.Listener, conds ...Condition) net.Listener {
 // Condition simulates an error scenario.
 type Condition interface {
 	Listener(net.Listener) net.Listener
+	Dialer(Dialer) Dialer
 }
 
-// AcceptError causes the listener to return an error on accept.
-// Ordering matters with this option as it short-circuits any options after
-// this one.
+// AcceptError causes an error on accept.  Ordering matters with this option as
+// it short-circuits any options after this one.
 func AcceptError(err error) Condition {
-	return newListener(func(l *listener) *listener {
-		l.accept = func() (net.Conn, error) {
-			return nil, err
-		}
-		return l
-	})
+	return &decorator{
+		listener: func(l *listener) *listener {
+			l.accept = func() (net.Conn, error) {
+				return nil, err
+			}
+			return l
+		},
+		dialer: func(d Dialer) Dialer {
+			return func(network, addr string) (net.Conn, error) {
+				return nil, err
+			}
+		},
+	}
 }
 
 // AcceptLatency adds latency to listener accept requests until either timeout
 // or underlying listener is closed. No duration hangs indefinitely until the
 // underlying listener is closed.
 func AcceptLatency(d ...time.Duration) Condition {
-	return newListener(func(l *listener) *listener {
-		var i uint64
-		doAccept := l.accept
-		l.accept = func() (net.Conn, error) {
-			if len(d) > 0 {
-				idx := int((atomic.AddUint64(&i, 1) - 1) % uint64(len(d)))
-				timer := time.NewTimer(d[idx])
-				defer timer.Stop()
-				<-timer.C
-			} else {
-				var blockForever chan struct{} = nil
-				<-blockForever
+	var i uint64
+	return &decorator{
+		listener: func(l *listener) *listener {
+			dl := newDeadline()
+			doAccept := l.accept
+			doClose := l.close
+			l.accept = func() (net.Conn, error) {
+				if len(d) > 0 {
+					idx := int((atomic.AddUint64(&i, 1) - 1) % uint64(len(d)))
+					dl.Wait(d[idx])
+				} else {
+					var blockForever chan struct{} = nil
+					<-blockForever
+				}
+				return doAccept()
 			}
-			return doAccept()
-		}
-		return l
-	})
+			l.close = func() error {
+				dl.Close()
+				return doClose()
+			}
+			return l
+		},
+		dialer: func(dial Dialer) Dialer {
+			return func(network, addr string) (net.Conn, error) {
+				if len(d) > 0 {
+					idx := int((atomic.AddUint64(&i, 1) - 1) % uint64(len(d)))
+					timer := time.NewTimer(d[idx])
+					defer timer.Stop()
+					<-timer.C
+				} else {
+					var blockForever chan struct{} = nil
+					<-blockForever
+				}
+				return dial(network, addr)
+			}
+		},
+	}
 }
 
 // ReadLatency adds latency to each read from underlying connections. Reads
@@ -147,10 +187,22 @@ func ReadError(err error) Condition {
 	})
 }
 
-type listenerFuncOption func(net.Listener) net.Listener
+type decorator struct {
+	listener func(*listener) *listener
+	dialer   func(Dialer) Dialer
+}
 
-func (f listenerFuncOption) Listener(l net.Listener) net.Listener {
-	return f(l)
+func (d *decorator) Listener(l net.Listener) net.Listener {
+	result := &listener{
+		accept: l.Accept,
+		close:  l.Close,
+		addr:   l.Addr,
+	}
+	return d.listener(result)
+}
+
+func (d *decorator) Dialer(dial Dialer) Dialer {
+	return d.dialer(dial)
 }
 
 type listener struct {
@@ -169,17 +221,6 @@ func (l *listener) Addr() net.Addr {
 
 func (l *listener) Close() error {
 	return l.close()
-}
-
-func newListener(f func(*listener) *listener) Condition {
-	return listenerFuncOption(func(l net.Listener) net.Listener {
-		result := &listener{
-			accept: l.Accept,
-			close:  l.Close,
-			addr:   l.Addr,
-		}
-		return f(result)
-	})
 }
 
 type conn struct {
@@ -226,10 +267,11 @@ func (c *conn) SetWriteDeadline(t time.Time) error {
 }
 
 func newConn(f func(*conn) *conn) Condition {
-	return listenerFuncOption(func(l net.Listener) net.Listener {
-		return &listener{
-			accept: func() (net.Conn, error) {
-				c, err := l.Accept()
+	return &decorator{
+		listener: func(l *listener) *listener {
+			doAccept := l.accept
+			l.accept = func() (net.Conn, error) {
+				c, err := doAccept()
 				if err != nil {
 					return c, err
 				}
@@ -243,11 +285,28 @@ func newConn(f func(*conn) *conn) Condition {
 					setReadDeadline:  c.SetReadDeadline,
 					setWriteDeadline: c.SetWriteDeadline,
 				}), nil
-			},
-			close: l.Close,
-			addr:  l.Addr,
-		}
-	})
+			}
+			return l
+		},
+		dialer: func(d Dialer) Dialer {
+			return func(network, addr string) (net.Conn, error) {
+				c, err := d(network, addr)
+				if err != nil {
+					return c, err
+				}
+				return f(&conn{
+					read:             c.Read,
+					write:            c.Write,
+					close:            c.Close,
+					localAddr:        c.LocalAddr,
+					remoteAddr:       c.RemoteAddr,
+					setDeadline:      c.SetDeadline,
+					setReadDeadline:  c.SetReadDeadline,
+					setWriteDeadline: c.SetWriteDeadline,
+				}), nil
+			}
+		},
+	}
 }
 
 type deadline struct {
